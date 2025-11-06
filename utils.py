@@ -1,5 +1,4 @@
 import imageio
-import collections
 import skimage
 import cv2
 from glob import glob
@@ -38,15 +37,15 @@ def pick(list, item_idcs):
 
 def get_mgrid(sidelen, dim=2, subsample=1):
     '''Generates a flattened grid of (x,y,...) coordinates in a range of -1 to 1.'''
-    # if isinstance(sidelen, int):
-    #     sidelen = dim * (sidelen,)
+    if isinstance(sidelen, int):
+        sidelen = dim * (sidelen,)
 
     if dim == 1:
         # pixel_coords = np.stack(np.mgrid[:sidelen[0]], axis=-1)[None, ...].astype(np.float32).T
         # pixel_coords[..., 0] = pixel_coords[..., 0] / (sidelen[0] - 1)
         #from: https://colab.research.google.com/github/vsitzmann/siren/blob/master/explore_siren.ipynb#scrollTo=V0Py4OsOaqgI
-        tensors = tuple(dim * [torch.linspace(-1, 1, steps=sidelen)])
-        mgrid = torch.stack(torch.meshgrid(*tensors), dim=-1)
+        tensors = tuple(dim * [torch.linspace(-1, 1, steps=sidelen[0])])
+        mgrid = torch.stack(torch.meshgrid(*tensors, indexing='ij'), dim=-1)
         mgrid = mgrid.reshape(-1, dim)
         return mgrid
     elif dim == 2:
@@ -170,9 +169,12 @@ def square_crop_img(img):
     return img
 
 
-def convert_int2color(imgs,color_mapping):
+def convert_int2color(imgs, color_mapping, device=None):
     # convert int to a color
     # color_mapping = {int: [r,g,b],...}
+    import device_utils
+    if device is None:
+        device = device_utils.get_device()
 
     colored_imgs = []
 
@@ -192,15 +194,16 @@ def convert_int2color(imgs,color_mapping):
         rgb = np.stack([r.squeeze(), g.squeeze(), b.squeeze()], axis=0)
         colored_imgs.append(rgb)
 
-    return torch.from_numpy(np.array(colored_imgs)).cuda()
+    return torch.from_numpy(np.array(colored_imgs)).to(device)
 
 
 
-def dict_to_gpu(ob):
-    if isinstance(ob, collections.Mapping):
-        return {k: dict_to_gpu(v) for k, v in ob.items()}
-    else:
-        return ob.cuda()
+def dict_to_gpu(ob, device=None):
+    """Legacy function name for backward compatibility. Use device_utils.dict_to_device instead."""
+    import device_utils
+    if device is None:
+        device = device_utils.get_device()
+    return device_utils.dict_to_device(ob, device)
 
 def stitch_audio_subset(audio_samples, num_sample=10, elmts=None):
     # concatenate arrays of audio samples

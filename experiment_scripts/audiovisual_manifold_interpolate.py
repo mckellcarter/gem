@@ -1,14 +1,17 @@
 # Enable import from parent package
 import sys
 import os
-import collections
+try:
+    from collections.abc import Mapping
+except ImportError:
+    from collections import Mapping
 sys.path.append( os.path.dirname( os.path.dirname( os.path.abspath(__file__) ) ) )
 import numpy as np
 import torchaudio
 import matplotlib.pyplot as plt
 import numpy as np
 
-import dataio, meta_modules, summaries, loss_functions, modules, training
+import dataio, meta_modules, summaries, loss_functions, modules, training, device_utils
 import torch.distributed as dist
 
 from multiprocessing import Manager
@@ -24,12 +27,11 @@ import configargparse
 import numpy as np
 import config
 from torch_ema import ExponentialMovingAverage
-from imageio import imwrite, imread, get_writer
+import imageio.v2 as imageio
 import os.path as osp
 import torchaudio
 import random
 from skimage.transform import resize as imresize
-
 
 p = configargparse.ArgumentParser()
 p.add('-c', '--config_filepath', required=False, is_config_file=True, help='Path to config file.')
@@ -37,8 +39,8 @@ p.add('-c', '--config_filepath', required=False, is_config_file=True, help='Path
 p.add_argument('--logging_root', type=str, default='log_root', help='root for logging')
 p.add_argument('--experiment_name', type=str, required=True,
                help='Name of subdirectory in logging_root where summaries and checkpoints will be saved.')
-p.add_argument('--outdir', type=str, required=True,
-               help='directory to be outputed')
+p.add_argument('--outdir', type=str, default='./audiovisual_output',
+               help='directory to be outputed (default: ./audiovisual_output)')
 
 # General training options
 p.add_argument('--gpus', type=int, default=1)
@@ -68,14 +70,16 @@ p.add_argument('--checkpoint_path', default=None, help='Checkpoint to trained mo
 p.add_argument('--test_latent_path', default=None, help='Checkpoint to trained latents')
 opt = p.parse_args()
 
-def dict_to_gpu(ob):
-    if isinstance(ob, collections.Mapping):
-        return {k: dict_to_gpu(v) for k, v in ob.items()}
+def dict_to_gpu(ob, device=None):
+    if device is None:
+        device = device_utils.get_device()
+    if isinstance(ob, Mapping):
+        return {k: dict_to_gpu(v, device) for k, v in ob.items()}
     else:
         if type(ob) == int:
             return ob
         else:
-            return ob.cuda()
+            return ob.to(device)
 
 
 def sync_model(model):
@@ -99,13 +103,20 @@ def plot_audio_signal(data, lw=1.0, stem=False):
     else:
         ax.plot(data, 'black', lw=lw)
     ax.set_ylim((-0.8, 0.8))
-    fig.savefig('/tmp/audio.png', bbox='tight', bbox_inches='tight', pad_inches=0.)
-    im = imread('/tmp/audio.png')
+    fig.savefig('/tmp/audio.png', bbox_inches='tight', pad_inches=0.)
+    plt.close(fig)  # Close figure to prevent memory leaks
+
+    im = imageio.imread('/tmp/audio.png')
     h, w = im.shape[0], im.shape[1]
     sf = 128 / h
 
-    hn, wn = 128, int(sf * w)
+    hn = 128
+    wn = int(sf * w)
+    # Round width to nearest multiple of 16 for H.264 compatibility
+    wn = ((wn + 15) // 16) * 16
     im = imresize(im, (hn, wn))[:, :, :3]
+    # Convert to uint8 to avoid lossy conversion warning
+    im = (im * 255).astype(np.uint8) if im.max() <= 1.0 else im.astype(np.uint8)
 
     return im
 
@@ -125,12 +136,13 @@ def multigpu_train(gpu, opt, shared_dict, shared_dict_wav, shared_mask):
     # train_generalization_dataset = dataio.AVGeneralizationWrapper(train_dataset, "sampled", sparsity_range=[1024, 1024], audio_sampling=1024, do_pad=True)
     val_generalization_dataset = dataio.AVGeneralizationWrapper(train_dataset, "full", sparsity_range=[32**2, 32**2], audio_sampling=sampling, do_pad=True)
 
+    device = device_utils.set_device(gpu)
+
     model = high_level_models.SirenImplicitGAN(num_items=num_items, hidden_layers=3, pos_encode=True, tanh_output=True, type=opt.type,
-                                               in_features=2, out_features=3, amortized=False, latent_dim=1024, manifold_dim=10, audiovisual=True).cuda()
+                                               in_features=2, out_features=3, amortized=False, latent_dim=1024, manifold_dim=10, audiovisual=True).to(device)
 
-    torch.cuda.set_device(gpu)
-
-    state_dict = torch.load(opt.checkpoint_path, map_location="cpu")['model_dict']
+    # Load checkpoint (weights_only=False needed for loading checkpoint dicts)
+    state_dict = torch.load(opt.checkpoint_path, map_location="cpu", weights_only=False)['model_dict']
     model.load_state_dict(state_dict)
 
     # Define the loss
@@ -142,7 +154,19 @@ def multigpu_train(gpu, opt, shared_dict, shared_dict_wav, shared_mask):
     mses = []
     psnrs = []
 
-    data = np.load("instrument.npz")
+    # Load normalization stats from data directory
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    data_path = os.path.join(repo_root, 'data', 'instrument.npz')
+
+    if not os.path.exists(data_path):
+        raise FileNotFoundError(
+            f"Could not find {data_path}\n"
+            f"Audiovisual demo requires instrument.npz for normalization stats.\n"
+            f"Please download the Instrument dataset and place instrument.npz in the data/ directory.\n"
+            f"See DATA_SETUP.md for more information."
+        )
+
+    data = np.load(data_path)
 
     mean = data['mean'][:-1]
     std = data['std'][:-1]
@@ -155,7 +179,9 @@ def multigpu_train(gpu, opt, shared_dict, shared_dict_wav, shared_mask):
     latents = state_dict['latents.weight']
     ix = 0
 
-    writer = get_writer("animation.mp4")
+    # Create video writer with H.264 codec for maximum compatibility
+    # yuv420p pixel format is required for QuickTime/Chrome playback
+    writer = imageio.get_writer("animation.mp4", format='FFMPEG', fps=30, codec='libx264', pixelformat='yuv420p')
 
     while True:
         with torch.no_grad():
@@ -166,7 +192,7 @@ def multigpu_train(gpu, opt, shared_dict, shared_dict_wav, shared_mask):
             latent = model.latents.weight[ix]
             latent_other = model.latents.weight[idx_other]
 
-            interval = torch.linspace(0, 1.0, 10).cuda()
+            interval = torch.linspace(0, 1.0, 10).to(device)
             diff = latent_other - latent
 
             latent = latent[None, :] + interval[:, None] * diff[None, :]
@@ -194,13 +220,15 @@ def multigpu_train(gpu, opt, shared_dict, shared_dict_wav, shared_mask):
 
             for i in range(10):
                 im_i = (pred_rgb[i] + 1) / 2.
+                # Convert to uint8 to avoid lossy conversion warning
+                im_i = (im_i * 255).astype(np.uint8)
+
                 wav_i = pred_wav[0, i]
 
                 if i == 0:
                     torchaudio.save("audio_{}.wav".format(counter), torch.Tensor(wav_i[None, :]), 16000)
 
                 wav_i = plot_audio_signal(wav_i)
-
 
                 panel_im = np.concatenate([im_i, wav_i], axis=1)
                 writer.append_data(panel_im)
@@ -209,9 +237,9 @@ def multigpu_train(gpu, opt, shared_dict, shared_dict_wav, shared_mask):
             ix = idx_other
             print(counter)
 
+        # Stop after generating 100 frames
         if counter > 100:
             writer.close()
-            assert False
             break
 
 
