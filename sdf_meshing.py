@@ -8,6 +8,7 @@ import plyfile
 import skimage.measure
 import time
 import torch
+import device_utils
 
 
 def create_mesh(
@@ -15,6 +16,7 @@ def create_mesh(
 ):
     start = time.time()
     ply_filename = filename
+    device = device_utils.get_device()
 
     # NOTE: the voxel_origin is actually the (bottom, left, down) corner, not the middle
     voxel_origin = [-1, -1, -1]
@@ -43,7 +45,7 @@ def create_mesh(
 
     while head < num_samples:
         print(head)
-        sample_subset = samples[head : min(head + max_batch, num_samples), 0:3].cuda()
+        sample_subset = samples[head : min(head + max_batch, num_samples), 0:3].to(device)
 
         samples[head : min(head + max_batch, num_samples), 3] = (
             decoder(sample_subset, idx=idx)
@@ -84,6 +86,7 @@ def create_mesh_gen(
 ):
     start = time.time()
     ply_filename = filename
+    device = device_utils.get_device()
 
     # NOTE: the voxel_origin is actually the (bottom, left, down) corner, not the middle
     voxel_origin = [-1, -1, -1]
@@ -113,7 +116,7 @@ def create_mesh_gen(
 
     while head < num_samples:
         print(head)
-        sample_subset = samples[head : min(head + max_batch, num_samples), 0:3].cuda()
+        sample_subset = samples[head : min(head + max_batch, num_samples), 0:3].to(device)
 
         samples[head : min(head + max_batch, num_samples), 3] = (
             decoder(sample_subset, latents, idx=idx)

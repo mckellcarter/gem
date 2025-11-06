@@ -3,7 +3,7 @@ import sys
 import os
 sys.path.append( os.path.dirname( os.path.dirname( os.path.abspath(__file__) ) ) )
 
-import dataio, meta_modules, summaries, loss_functions, modules, training
+import dataio, meta_modules, summaries, loss_functions, modules, training, device_utils
 import torch.distributed as dist
 
 from multiprocessing import Manager
@@ -44,7 +44,7 @@ p.add_argument('--steps_til_summary', type=int, default=1000,
 p.add_argument('--iters_til_ckpt', type=int, default=10000,
                help='Training steps until save checkpoint')
 p.add_argument('--dataset', type=str, default='celeba',
-               help='Time interval in seconds until tensorboard summary is saved.')
+               help="Dataset to use: 'celeba' (auto-downloads, 178x218) or 'celebahq' (manual, 1024x1024)")
 p.add_argument('--type', type=str, default='linear_lle',
                help='type of loss on latents')
 p.add_argument('--sparsity', type=str, default='sampled',
@@ -70,7 +70,13 @@ def multigpu_train(gpu, opt, shared_dict, shared_mask):
         dist.init_process_group(backend='nccl', init_method='tcp://localhost:6007', world_size=opt.gpus, rank=gpu)
 
     def create_dataloader_callback(sidelength, batch_size):
-        train_img_dataset = dataio.CelebAHQ(sidelength, cache=shared_dict, cache_mask=shared_mask)
+        # Choose dataset based on --dataset argument
+        if opt.dataset == 'celeba':
+            train_img_dataset = dataio.CelebA(sidelength, cache=shared_dict, cache_mask=shared_mask)
+        elif opt.dataset == 'celebahq':
+            train_img_dataset = dataio.CelebAHQ(sidelength, cache=shared_dict, cache_mask=shared_mask)
+        else:
+            raise ValueError(f"Unknown dataset: {opt.dataset}. Use 'celeba' or 'celebahq'")
         # val_img_dataset = dataio.CelebAHQ(sidelength)
         sparsity_range = min(256, sidelength**2)
         train_generalization_dataset = dataio.GeneralizationWrapper(train_img_dataset, context_sparsity=opt.sparsity,
@@ -88,12 +94,16 @@ def multigpu_train(gpu, opt, shared_dict, shared_mask):
 
         return train_loader, val_loader
 
-    torch.cuda.set_device(gpu)
+    device = device_utils.set_device(gpu)
+    if gpu == 0:
+        device_utils.print_device_info()
+
     model = high_level_models.SirenImplicitGAN(num_items=num_samples, hidden_layers=3,
-                                               amortized=False, latent_dim=1024, noise=True, pos_encode=True, tanh_output=True, type=opt.type, manifold_dim=10, film=False).cuda()
+                                               amortized=False, latent_dim=1024, noise=True, pos_encode=True, tanh_output=True, type=opt.type, manifold_dim=10, film=False).to(device)
 
     if opt.checkpoint_path is not None:
-        model.load_state_dict(torch.load(opt.checkpoint_path, map_location="cpu")['model_dict'])
+        # Load checkpoint (weights_only=False needed for loading checkpoint dicts)
+        model.load_state_dict(torch.load(opt.checkpoint_path, map_location="cpu", weights_only=False)['model_dict'])
 
     if opt.gpus > 1:
         sync_model(model)
@@ -120,7 +130,7 @@ def multigpu_train(gpu, opt, shared_dict, shared_mask):
                                  dataloader_params=((64, 128),),
                                  lr=opt.lr, steps_til_summary=opt.steps_til_summary, epochs_til_checkpoint=opt.epochs_til_ckpt,
                                  model_dir=root_path, loss_fn=loss_fn, iters_til_checkpoint=opt.iters_til_ckpt, summary_fn=summary_fn,
-                                 clip_grad=False, val_loss_fn=val_loss_fn, overwrite=True, gpus=opt.gpus, rank=gpu)
+                                 clip_grad=False, val_loss_fn=val_loss_fn, overwrite=True, gpus=opt.gpus, rank=gpu, device=device)
 
 if __name__ == "__main__":
     opt = p.parse_args()

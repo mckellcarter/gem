@@ -10,17 +10,17 @@ import time
 import numpy as np
 import os
 import shutil
-import collections
 from collections import defaultdict
 import torch.distributed as dist
 from utils import get_mgrid
+import device_utils
 
 
-def dict_to_gpu(ob):
-    if isinstance(ob, collections.Mapping):
-        return {k: dict_to_gpu(v) for k, v in ob.items()}
-    else:
-        return ob.cuda()
+def dict_to_gpu(ob, device=None):
+    """Legacy function name for backward compatibility. Use dict_to_device instead."""
+    if device is None:
+        device = device_utils.get_device()
+    return device_utils.dict_to_device(ob, device)
 
 
 def average_gradients(model):
@@ -36,8 +36,10 @@ def average_gradients(model):
 def multiscale_training(model, ema_model, lr, steps_til_summary, epochs_til_checkpoint, model_dir, loss_fn,
                         dataloader_callback, dataloader_iters, dataloader_params,
                         val_loss_fn=None, summary_fn=None, iters_til_checkpoint=None, clip_grad=False,
-                        overwrite=True, optimizers=None, batches_per_validation=10, gpus=1, rank=0):
+                        overwrite=True, optimizers=None, batches_per_validation=10, gpus=1, rank=0, device=None):
 
+    if device is None:
+        device = device_utils.get_device()
 
     model_dir_base = model_dir
     for i in range(1000):
@@ -49,12 +51,15 @@ def multiscale_training(model, ema_model, lr, steps_til_summary, epochs_til_chec
                                       val_dataloader=val_dataloader, epochs_til_checkpoint=epochs_til_checkpoint, model_dir=model_dir, loss_fn=loss_fn,
                                       val_loss_fn=val_loss_fn, summary_fn=summary_fn, iters_til_checkpoint=iters_til_checkpoint,
                                       clip_grad=clip_grad, overwrite=overwrite, optimizers=optimizers, batches_per_validation=batches_per_validation,
-                                      gpus=gpus, rank=rank, max_steps=max_steps)
+                                      gpus=gpus, rank=rank, max_steps=max_steps, device=device)
 
 
 def train(model, ema_model, train_dataloader, epochs, lr, steps_til_summary, epochs_til_checkpoint, model_dir, loss_fn,
           summary_fn=None, iters_til_checkpoint=None, val_dataloader=None, clip_grad=False, val_loss_fn=None,
-          overwrite=True, optimizers=None, batches_per_validation=10, gpus=1, rank=0, max_steps=None):
+          overwrite=True, optimizers=None, batches_per_validation=10, gpus=1, rank=0, max_steps=None, device=None):
+
+    if device is None:
+        device = device_utils.get_device()
 
     if optimizers is None:
         optimizers = [torch.optim.Adam(lr=lr, params=model.parameters())]
@@ -90,8 +95,8 @@ def train(model, ema_model, train_dataloader, epochs, lr, steps_til_summary, epo
         for epoch in range(epochs):
 
             for step, (model_input, gt) in enumerate(train_dataloader):
-                model_input = dict_to_gpu(model_input)
-                gt = dict_to_gpu(gt)
+                model_input = dict_to_gpu(model_input, device)
+                gt = dict_to_gpu(gt, device)
 
                 start_time = time.time()
 
@@ -152,8 +157,8 @@ def train(model, ema_model, train_dataloader, epochs, lr, steps_til_summary, epo
                             model.eval()
                             val_losses = defaultdict(list)
                             for val_i, (model_input, gt) in enumerate(val_dataloader):
-                                model_input = dict_to_gpu(model_input)
-                                gt = dict_to_gpu(gt)
+                                model_input = dict_to_gpu(model_input, device)
+                                gt = dict_to_gpu(gt, device)
 
                                 model_output = model(model_input)
                                 val_loss = val_loss_fn(model_output, gt)
@@ -204,7 +209,10 @@ def train(model, ema_model, train_dataloader, epochs, lr, steps_til_summary, epo
 
 def train_autodecoder_gan(model, discriminator, train_dataloader, epochs, lr, steps_til_summary, epochs_til_checkpoint, model_dir, loss_fn,
           summary_fn=None, iters_til_checkpoint=None, val_dataloader=None, clip_grad=False, val_loss_fn=None,
-          overwrite=True, optimizers=None, batches_per_validation=10, gpus=1, rank=0, max_steps=None):
+          overwrite=True, optimizers=None, batches_per_validation=10, gpus=1, rank=0, max_steps=None, device=None):
+
+    if device is None:
+        device = device_utils.get_device()
 
     model_optim, disc_optim = [torch.optim.Adam(lr=lr, params=model.parameters()),
             torch.optim.Adam(lr=lr, params=discriminator.parameters(), betas=(0.0, 0.9))]
@@ -241,8 +249,8 @@ def train_autodecoder_gan(model, discriminator, train_dataloader, epochs, lr, st
         for epoch in range(epochs):
 
             for step, (model_input, gt) in enumerate(train_dataloader):
-                model_input = dict_to_gpu(model_input)
-                gt = dict_to_gpu(gt)
+                model_input = dict_to_gpu(model_input, device)
+                gt = dict_to_gpu(gt, device)
 
                 start_time = time.time()
 
@@ -299,7 +307,7 @@ def train_autodecoder_gan(model, discriminator, train_dataloader, epochs, lr, st
                 disc_loss = disc_loss + 0.01 * loss_g_gan_fake
 
                 batch_size = real_model_output['representation'].shape[0]
-                alpha = torch.rand(batch_size, 1).cuda()
+                alpha = torch.rand(batch_size, 1).to(device)
                 interpolated = alpha * real_model_output['representation'].data + (1 - alpha) * fake_model_output['representation'].data
                 interpolated = interpolated.requires_grad_(True)
 
@@ -309,7 +317,7 @@ def train_autodecoder_gan(model, discriminator, train_dataloader, epochs, lr, st
 
                 # Calculate gradients of probabilities with respect to examples
                 gradients = torch.autograd.grad(outputs=prob_interpolated, inputs=input_list,
-                                                grad_outputs=torch.ones(prob_interpolated.size()).cuda(),
+                                                grad_outputs=torch.ones(prob_interpolated.size()).to(device),
                                                 create_graph=True, retain_graph=True, allow_unused=True)
 
                 gradients = [g for g in gradients if g is not None]
@@ -353,8 +361,8 @@ def train_autodecoder_gan(model, discriminator, train_dataloader, epochs, lr, st
                             model.eval()
                             val_losses = defaultdict(list)
                             for val_i, (model_input, gt) in enumerate(val_dataloader):
-                                model_input = dict_to_gpu(model_input)
-                                gt = dict_to_gpu(gt)
+                                model_input = dict_to_gpu(model_input, device)
+                                gt = dict_to_gpu(gt, device)
 
                                 model_output = model(model_input)
                                 val_loss = val_loss_fn(model_output, gt)
@@ -397,7 +405,11 @@ def train_autodecoder_gan(model, discriminator, train_dataloader, epochs, lr, st
 def train_latent_gan(model, discriminator, data_loader, epochs, lr, steps_til_summary, model_dir,
                      loss_fn, summary_fn=None, iters_til_checkpoint=None, overwrite=True, optimizers=None, val_loader=None,
                      gt_model=None, gradient_penalty=False, r1_loss=True, real_reconstruction_loss=True, gpus=1, rank=0, val_dataset=None,
-                     multimodal=False):
+                     multimodal=False, device=None):
+
+    if device is None:
+        device = device_utils.get_device()
+
     if optimizers is None:
         model_optim, disc_optim = [torch.optim.Adam(lr=lr, params=model.generator.parameters(), betas=(0.0, 0.9)),
                                    torch.optim.Adam(lr=lr, params=discriminator.parameters(), betas=(0.0, 0.9))]
@@ -448,7 +460,7 @@ def train_latent_gan(model, discriminator, data_loader, epochs, lr, steps_til_su
     else:
         mgrid = utils.get_mgrid((size, size), dim=2)
         mgrid = mgrid[None, :, :].repeat(16, 1, 1)
-    mgrid = mgrid.cuda()
+    mgrid = mgrid.to(device)
 
     with tqdm(total=len(data_loader) * epochs) as pbar:
         train_losses = []
@@ -465,10 +477,10 @@ def train_latent_gan(model, discriminator, data_loader, epochs, lr, steps_til_su
                                          global_step=total_steps, dataformats="HWC")
                 model_loss = 0.
 
-                fake_model_input = dict_to_gpu(fake_model_input)
-                real_model_input = dict_to_gpu(real_model_input)
-                real_gt = dict_to_gpu(real_gt)
-                fake_gt = dict_to_gpu(fake_gt)
+                fake_model_input = dict_to_gpu(fake_model_input, device)
+                real_model_input = dict_to_gpu(real_model_input, device)
+                real_gt = dict_to_gpu(real_gt, device)
+                fake_gt = dict_to_gpu(fake_gt, device)
 
                 # Fake forward pass
                 fake_model_output = model(fake_model_input, prior_sample=True, render=False, manifold_model=False)
@@ -500,7 +512,7 @@ def train_latent_gan(model, discriminator, data_loader, epochs, lr, steps_til_su
                 if gradient_penalty:
                     # Calculate interpolation
                     batch_size = real_model_output['representation'].shape[0]
-                    alpha = torch.rand(batch_size, 1).cuda()
+                    alpha = torch.rand(batch_size, 1).to(device)
                     interpolated = alpha * real_model_output['representation'].data + (1 - alpha) * fake_model_output['representation'].data
                     interpolated = interpolated.requires_grad_(True)
 
@@ -513,7 +525,7 @@ def train_latent_gan(model, discriminator, data_loader, epochs, lr, steps_til_su
 
                     # Calculate gradients of probabilities with respect to examples
                     gradients = torch.autograd.grad(outputs=prob_interpolated, inputs=input_list,
-                                                    grad_outputs=torch.ones(prob_interpolated.size()).cuda(),
+                                                    grad_outputs=torch.ones(prob_interpolated.size()).to(device),
                                                     create_graph=True, retain_graph=True, allow_unused=True)
 
                     gradients = [g for g in gradients if g is not None]
@@ -535,7 +547,7 @@ def train_latent_gan(model, discriminator, data_loader, epochs, lr, steps_til_su
                 if r1_loss:
                     # Calculate interpolation
                     batch_size = real_model_output['representation'].shape[0]
-                    alpha = torch.rand(batch_size, 1).cuda()
+                    alpha = torch.rand(batch_size, 1).to(device)
                     interpolated = real_model_output['representation'].clone().detach().requires_grad_()
                     representations = [rep.clone().detach().requires_grad_() for rep in real_model_output['representations']]
 
@@ -545,7 +557,7 @@ def train_latent_gan(model, discriminator, data_loader, epochs, lr, steps_til_su
 
                     # Calculate gradients of probabilities with respect to examples
                     gradients = torch.autograd.grad(outputs=prob_interpolated, inputs=input_list,
-                                                    grad_outputs=torch.ones(prob_interpolated.size()).cuda(),
+                                                    grad_outputs=torch.ones(prob_interpolated.size()).to(device),
                                                     create_graph=True, retain_graph=True)
 
                     gradients = torch.cat(gradients, dim=-1)
@@ -658,7 +670,11 @@ def train_latent_gan(model, discriminator, data_loader, epochs, lr, steps_til_su
 
 
 def train_conv_gan(model, discriminator, data_loader, epochs, lr, steps_til_summary, epochs_til_checkpoint, model_dir,
-                   summary_fn=None, iters_til_checkpoint=None, overwrite=True, optimizers=None, val_loader=None):
+                   summary_fn=None, iters_til_checkpoint=None, overwrite=True, optimizers=None, val_loader=None, device=None):
+
+    if device is None:
+        device = device_utils.get_device()
+
     if optimizers is None:
         model_optim, disc_optim = [torch.optim.Adam(lr=lr, betas=(0., 0.9), params=model.parameters()),
                                    torch.optim.Adam(lr=lr, betas=(0., 0.9), params=discriminator.parameters())]
@@ -695,8 +711,8 @@ def train_conv_gan(model, discriminator, data_loader, epochs, lr, steps_til_summ
                 model_loss = 0.
 
                 # Fake forward pass
-                model_input = dict_to_gpu(model_input)
-                gt = dict_to_gpu(gt)
+                model_input = dict_to_gpu(model_input, device)
+                gt = dict_to_gpu(gt, device)
 
                 fake_model_output = model(model_input)
 
@@ -750,8 +766,8 @@ def train_conv_gan(model, discriminator, data_loader, epochs, lr, steps_til_summ
                             model.eval()
                             val_losses = defaultdict(list)
                             for val_i, (model_input, gt) in enumerate(val_loader):
-                                model_input = dict_to_gpu(model_input)
-                                gt = dict_to_gpu(gt)
+                                model_input = dict_to_gpu(model_input, device)
+                                gt = dict_to_gpu(gt, device)
 
                                 model_output = model(model_input, prior_sample=True, real=False)
                                 break

@@ -1,6 +1,9 @@
 from torch.utils.data import DataLoader
 # from fid import get_fid_score
-import collections
+try:
+    from collections.abc import Mapping
+except ImportError:
+    from collections import Mapping
 import numpy as np
 import torch
 from torchvision.utils import make_grid
@@ -10,13 +13,16 @@ from imageio import imwrite
 import os
 from shutil import rmtree
 from tqdm import tqdm
+import device_utils
 
 
-def dict_to_gpu(ob):
-    if isinstance(ob, collections.Mapping):
-        return {k: dict_to_gpu(v) for k, v in ob.items()}
+def dict_to_gpu(ob, device=None):
+    if device is None:
+        device = device_utils.get_device()
+    if isinstance(ob, Mapping):
+        return {k: dict_to_gpu(v, device) for k, v in ob.items()}
     else:
-        return ob.cuda()
+        return ob.to(device)
 
 
 def compute_fid_nn(dataset, model, rank):
@@ -25,7 +31,7 @@ def compute_fid_nn(dataset, model, rank):
     real_images = []
     fake_images = []
 
-    torch.cuda.set_device(rank)
+    device = device_utils.set_device(rank)
     imsize = dataset.im_size
 
     with torch.no_grad():
@@ -113,7 +119,8 @@ def compute_fid_nn(dataset, model, rank):
             #     break
 
 
-    torch.cuda.empty_cache()
+    if device.type == 'cuda':
+        torch.cuda.empty_cache()
 
     real_path = "/tmp/real_image"
     fake_path = "/tmp/fake_image"

@@ -66,7 +66,7 @@ class LowRankHyperNetwork(nn.Module):
                 params[name] = self.hypo_parameters[name] * torch.sigmoid(low_rank_w)
 
         representations = representation
-        representation = torch.cat(representation, dim=-1).cuda()
+        representation = torch.cat(representation, dim=-1).to(z.device)
         return {'params':params, 'representation':representation, 'representations': representations}
 
     def gen_params(self, representation):

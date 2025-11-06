@@ -13,7 +13,7 @@ def inner_maml_mse(prediction, gt, mask=None):
     if mask is None:
         loss = ((prediction - gt) ** 2)
     else:
-        loss = (mask.cuda() * (prediction - gt) ** 2)
+        loss = (mask * (prediction - gt) ** 2)
     return loss.sum(0).mean()
 
 
@@ -79,20 +79,20 @@ def comp_mse(model_output, gt, mask=None):
     for instance in range(lm_coords.shape[-1]):
         instance_coord = lm_coords[..., instance] # (-1, 2, 3)
         pairwise = (instance_coord[..., None] - instance_coord[:, :, None, :]).norm(dim=1)
-        pairwise_zero = pairwise * (1 - torch.eye(3, 3)[None, ...].repeat(batch_size, 1, 1).cuda())
-        lm_loss += torch.max(torch.zeros_like(pairwise).cuda(), 0.05 - pairwise_zero).mean()* 100
+        pairwise_zero = pairwise * (1 - torch.eye(3, 3)[None, ...].repeat(batch_size, 1, 1).to(pairwise.device))
+        lm_loss += torch.max(torch.zeros_like(pairwise), 0.05 - pairwise_zero).mean()* 100
     print(lm_loss)
     return {'img_loss': loss.mean(), 'distance': lm_loss}
 
 
 def image_mse_decay(model_output, gt, mask=None):
-    loss = ((model_output['rgb'].cuda() - gt['rgb'].cuda()) ** 2)
+    loss = ((model_output['rgb'] - gt['rgb']) ** 2)
     representation_loss = 0.0 * torch.norm(model_output['representation'], dim=-1).mean()
     return {'img_loss': loss.mean(), 'rep_loss': representation_loss.mean()}
 
 
 def image_mse_manifold(model_output, gt, mask=None):
-    loss = ((model_output['rgb'].cuda() - gt['rgb'].cuda()) ** 2)
+    loss = ((model_output['rgb'] - gt['rgb']) ** 2)
     z = model_output['z_orig']
     latents = model_output['latents'].weight
     diff = z[:8, None, :] - latents[None, :, :]
@@ -107,7 +107,7 @@ def image_mse_manifold(model_output, gt, mask=None):
 
 
 def image_mse_linear(model_output, gt, mask=None):
-    loss = ((model_output['rgb'].cuda() - gt['rgb'].cuda()) ** 2)
+    loss = ((model_output['rgb'] - gt['rgb']) ** 2)
 
     weight = model_output['weights']
     inv_weight = torch.clamp(-weight, 0, 1000)
@@ -135,7 +135,7 @@ def image_mse_linear(model_output, gt, mask=None):
 
     z = model_output['z_orig']
 
-    loss_linear = ((model_output['rgb_linear'].cuda() - gt['rgb'].cuda()) ** 2)
+    loss_linear = ((model_output['rgb_linear'] - gt['rgb']) ** 2)
 
     return {'img_loss': loss.mean(), 'linear_loss': loss_linear, 'loss_weight': loss_weight, 'mds_loss': torch.abs(dist_norm - mse_norm).mean()}
 
@@ -194,17 +194,17 @@ def occupancy_linear(prediction, gt, mask=None):
 
 def image_mse(model_output, gt, mask=None):
     if mask is None:
-        loss = ((model_output['rgb'].cuda() - gt['rgb'].cuda()) ** 2)
+        loss = ((model_output['rgb'] - gt['rgb']) ** 2)
 
         return {'img_loss': loss.mean()}
     else:
-        loss = (mask.cuda() * (model_output['rgb'].cuda() - gt['rgb'].cuda()) ** 2)
+        loss = (mask * (model_output['rgb'] - gt['rgb']) ** 2)
         loss /= (3 * mask.sum(dim=0, keepdim=True).sum(dim=-1, keepdim=True).sum(dim=1, keepdim=True)+1)
         return {'img_loss':loss.sum()}
 
 
 def image_mse_spectral(model_output, gt, mask=None):
-    loss = ((model_output['rgb'].cuda() - gt['rgb'].cuda()) ** 2)
+    loss = ((model_output['rgb'] - gt['rgb']) ** 2)
     z = model_output['z_orig']
     z_mean = z.mean(dim=-1, keepdim=True)
     z_center = z - z_mean
@@ -228,7 +228,7 @@ def audio_visual_mse(model_output, gt, mask=None):
     pred_wav = pred_wav.squeeze()
     losses["audio_loss"] = ((pred_wav - gt_wav)**2).mean()
 
-    loss =  (pred_rgb.cuda() - gt['rgb'].cuda()) ** 2
+    loss =  (pred_rgb - gt['rgb']) ** 2
     losses['img_loss'] = loss.mean()
 
     return losses
@@ -240,7 +240,7 @@ def audio_visual_mse_image_only(model_output, gt, mask=None):
     pred_rgb, pred_wav = model_output['model_out']
     gt_wav = gt['wav'].squeeze(axis=-1)
 
-    loss =  (pred_rgb.cuda() - gt['rgb'].cuda()) ** 2
+    loss =  (pred_rgb - gt['rgb']) ** 2
     losses['img_loss'] = loss.mean()
 
     return losses
@@ -269,7 +269,7 @@ def audio_visual_mse_linear(model_output, gt, mask=None):
     pred_wav = pred_wav.squeeze()
     losses["audio_loss"] = ((pred_wav - gt_wav)**2).mean()
 
-    loss =  (pred_rgb.cuda() - gt['rgb'].cuda()) ** 2
+    loss =  (pred_rgb - gt['rgb']) ** 2
     losses['img_loss'] = loss.mean()
 
     pred_rgb, pred_wav = model_output['model_out_linear']
@@ -277,7 +277,7 @@ def audio_visual_mse_linear(model_output, gt, mask=None):
     gt_wav = gt['wav'].squeeze(axis=-1)
     losses["audio_linear_loss"] = ((pred_wav - gt_wav)**2).mean()
 
-    loss = ((pred_rgb.cuda() - gt['rgb'].cuda()) ** 2)
+    loss = ((pred_rgb - gt['rgb']) ** 2)
     losses["img_linear_loss"] = loss.mean()
 
     weight = model_output['weights']
@@ -315,7 +315,7 @@ def audio_visual_mse_linear_image_only(model_output, gt, mask=None):
     losses = {}
 
     pred_rgb, pred_wav = model_output['model_out']
-    loss =  (pred_rgb.cuda() - gt['rgb'].cuda()) ** 2
+    loss =  (pred_rgb - gt['rgb']) ** 2
     losses['img_loss'] = loss.mean()
 
     return losses
@@ -335,14 +335,14 @@ def audio_visual_mse_linear_audio_only(model_output, gt, mask=None):
 
 def image_mse_grad_penalty(model_output, gt, mask=None):
     if mask is None:
-        loss = ((model_output['rgb'].cuda() - gt['rgb'].cuda()) ** 2)
+        loss = ((model_output['rgb'] - gt['rgb']) ** 2)
         rgb_loss = torch.abs(model_output['rgb']).mean(dim=1).mean(dim=1)
         z_grad = torch.autograd.grad(rgb_loss.sum(), [model_output['z']], create_graph=True)[0]
         grad_penalty = 1e-3 * torch.norm(z_grad, dim=-1).mean()
 
         return {'img_loss': loss.mean(), 'grad_penalty': grad_penalty}
     else:
-        loss = (mask.cuda() * (model_output['rgb'].cuda() - gt['rgb'].cuda()) ** 2)
+        loss = (mask * (model_output['rgb'] - gt['rgb']) ** 2)
         loss /= (3 * mask.sum(dim=0, keepdim=True).sum(dim=-1, keepdim=True).sum(dim=1, keepdim=True)+1)
         return {'img_loss':loss.sum()}
 
@@ -417,7 +417,7 @@ class LatentGan(nn.Module):
         loss_dict = image_mse(model_output, gt, gt['mask'])
 
         batch_size = model_output['rgb'].shape[0]
-        rand_z = torch.randn((batch_size, self.latent_dim)).cuda()
+        rand_z = torch.randn((batch_size, self.latent_dim)).to(model_output['rgb'].device)
 
         # Discriminator forward passes
         # Fake forward step
@@ -436,7 +436,7 @@ class LatentGan(nn.Module):
 
 
 def kl_div(model_outputs, prior_std=1.0):
-    """Computes varitional loss
+    r"""Computes varitional loss
     KL(N(\mu, \sigma), N(0, 1)) = \log \frac{1}{\sigma} + \frac{\sigma^2 + \mu^2}{2} - \frac{1}{2}
     KL(N(\mu, \sigma), N(0, 0.01)) = \log \frac{0.01}{\sigma} + \frac{\sigma^2 + \mu^2}{2*0.01*0.01} - \frac{1}{2}
     """
@@ -464,16 +464,16 @@ def variational_auto_decoder(model_output, gt, kl_weight=1e-2):
 
 class ImageSemantic():
     def __init__(self, class_weights):
-        self.class_weights = class_weights.cuda()
+        self.class_weights = class_weights
 
     def __call__(self, model_output, gt, mask=None):
         pred_img = model_output['rgb']
         gt_img = gt['rgb']
 
         if mask is None:
-            img_loss = ((pred_img.cuda() - gt_img.cuda()) ** 2)
+            img_loss = ((pred_img - gt_img) ** 2)
         else:
-            img_loss = (mask.cuda() * (pred_img.cuda() - gt_img.cuda()) ** 2)
+            img_loss = (mask * (pred_img - gt_img) ** 2)
 
         # maml_loss = 0
         # for input, output in model_output['maml_ins_outs']:
@@ -483,7 +483,7 @@ class ImageSemantic():
         pred_logits = model_output['semantic'].flatten(start_dim=0, end_dim=1)
         labels = gt['semantic'].flatten().long()
 
-        sem_loss = torch.nn.functional.cross_entropy(pred_logits.cuda(), labels.cuda(), weight=self.class_weights)
+        sem_loss = torch.nn.functional.cross_entropy(pred_logits, labels, weight=self.class_weights)
         # return {"semantic_loss": sem_loss}
         # return {"semantic_loss": sem_loss, 'maml_loss':maml_loss}
         return {'img_loss': img_loss, "semantic_loss": sem_loss}
@@ -495,14 +495,14 @@ def inner_maml_mse_segmentation(prediction, gt, mask=None):
     if mask is None:
         loss = ((prediction - gt) ** 2)
     else:
-        loss = (mask.cuda() * (prediction - gt) ** 2)
+        loss = (mask * (prediction - gt) ** 2)
     return loss.sum(0).mean()
 
 
 def outer_srns_mse(model_out, gt):
     losses = {}
     trgt_shape = gt['y'].shape
-    rgb = model_out['model_out'].cuda().view(trgt_shape)
+    rgb = model_out['model_out'].view(trgt_shape)
 
     losses['img_loss'] = ((rgb - gt['y']) ** 2).mean()
     losses['depth_loss'] = ((model_out['query_ego_out']['depth'] * (model_out['query_ego_out']['depth']<0).float())**2).mean() * 1e4
@@ -514,7 +514,7 @@ def inner_gon(prediction, gt, mask=None):
     if mask is None:
         loss = ((prediction - gt) ** 2)
     else:
-        loss = (mask.cuda() * (prediction - gt) ** 2)
+        loss = (mask * (prediction - gt) ** 2)
     return loss.sum(0).mean()
 
 
@@ -568,7 +568,7 @@ def val_image_semantic(model_output, gt, mask=None):
 
     pred_logits = model_output['model_out'][:, :, -num_labels:].flatten(start_dim=0, end_dim=1)
     labels = gt['y'][:, :, -1:].flatten().long()
-    sem_val_loss = torch.nn.functional.cross_entropy(pred_logits.cuda(), labels.cuda())
+    sem_val_loss = torch.nn.functional.cross_entropy(pred_logits, labels)
 
     # model_out += 1.
     # model_out /= 2.
@@ -587,9 +587,9 @@ def depth_mse(model_output, gt, mask=None):
     pred_depth = model_output['model_out'][:, :, -1:]
     gt_depth = gt['y'][:, :, -1:]
     if mask is None:
-        loss = ((pred_depth.cuda() - gt_depth.cuda()) ** 2)
+        loss = ((pred_depth - gt_depth) ** 2)
     else:
-        loss = (mask.cuda() * (pred_depth.cuda() - gt_depth.cuda()) ** 2)
+        loss = (mask * (pred_depth - gt_depth) ** 2)
 
     return {'img_loss': loss.mean()}
 
@@ -649,7 +649,7 @@ def gradients_color_mse(model_output, gt):
     gradients_b = diff_operators.gradient(model_output['model_out'][..., 2], model_output['model_in'])
     gradients = torch.cat((gradients_r, gradients_g, gradients_b), dim=-1)
     # compare them with the ground-truth
-    weights = torch.tensor([1e1, 1e1, 1., 1., 1e1, 1e1]).cuda()
+    weights = torch.tensor([1e1, 1e1, 1., 1., 1e1, 1e1]).to(gradients.device)
     gradients_loss = torch.mean((weights * (gradients[0:2] - gt['gradients']).pow(2)).sum(-1))
     return {'gradients_loss': gradients_loss}
 
@@ -752,7 +752,7 @@ def helmholtz_pml(model_output, gt):
                                       diff_constraint_hom,
                                       torch.zeros_like(diff_constraint_hom))
     if full_waveform_inversion:
-        data_term = torch.where(rec_boundary_values != 0, y - rec_boundary_values, torch.Tensor([0.]).cuda())
+        data_term = torch.where(rec_boundary_values != 0, y - rec_boundary_values, torch.Tensor([0.]).to(y.device))
     else:
         data_term = torch.Tensor([0.])
 

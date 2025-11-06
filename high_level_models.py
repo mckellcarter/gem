@@ -76,8 +76,6 @@ class SirenImplicitGAN(nn.Module):
         self.nselect = 1
         self.dist = torch.distributions.dirichlet.Dirichlet(torch.ones(self.nselect))
 
-        self.cuda()
-
     def freeze_gt(self):
         self.film.requires_grad_(False)
 
@@ -544,12 +542,11 @@ class SirenGAN(nn.Module):
         self.film = meta_modules.FILMNetwork(hypo_module=self.img_siren, latent_dim=latent_dim)
         # self.film = meta_modules.HyperNetwork(hyper_in_features=self.latent_dim, hyper_hidden_layers=3,
         #                                       hyper_hidden_features=256, hypo_module=self.img_siren)
-        self.cuda()
         print(self)
 
     def forward(self, input, render=True, prior_sample=True):
         out_dict = {}
-        z = torch.randn((input['context']['x'].shape[0], self.latent_dim)).cuda()
+        z = torch.randn((input['context']['x'].shape[0], self.latent_dim)).to(input['context']['x'].device)
         film_params = self.film(z)
         out_dict['fast_params'] = film_params
 
@@ -592,7 +589,6 @@ class SirenVAD(nn.Module):
                                          out_features=self.latent_dim, outermost_linear=True)
 
         self.share_first_layer = share_first_layer
-        self.cuda()
 
     def forward(self, input, render=True, prior_sample=False, closest_idx=False):
         out_dict = {}
