@@ -49,8 +49,18 @@ p.add_argument('--pretrain', action='store_true')
 p.add_argument('--split', type=str, default='train')
 p.add_argument('--type', type=str, default='linear_lle',
                help='type of loss on latents')
-p.add_argument('--checkpoint_path', default=None, help='Checkpoint to trained model.')
+p.add_argument('--checkpoint_path', default=None, help='Checkpoint to trained model (loads weights only, for backward compatibility).')
 p.add_argument('--index_path', default=None, help='Path to inidices to use for subsampling autodecoder')
+
+# Checkpoint resuming options
+p.add_argument('--resume', dest='auto_resume', action='store_true', default=True,
+               help='Automatically resume from latest checkpoint if available (default: True)')
+p.add_argument('--no-resume', dest='auto_resume', action='store_false',
+               help='Do not automatically resume from checkpoint')
+p.add_argument('--resume_from', type=str, default=None,
+               help='Specify checkpoint path to resume from (overrides auto-resume)')
+p.add_argument('--start_fresh', action='store_true',
+               help='Ignore existing checkpoints and start training from scratch')
 
 opt = p.parse_args()
 
@@ -124,10 +134,26 @@ def multigpu_train(gpu, opt, shared_dict, shared_dict_wav, shared_mask):
         loss_fn = loss_functions.audio_visual_mse
 
 
+    # Handle checkpoint resuming options
+    resume_checkpoint = opt.resume_from
+    auto_resume = opt.auto_resume and not opt.start_fresh
+
+    # Display resume configuration
+    if gpu == 0:
+        if opt.start_fresh:
+            print("[Training] Starting fresh training (ignoring existing checkpoints)")
+        elif resume_checkpoint:
+            print(f"[Training] Will attempt to resume from: {resume_checkpoint}")
+        elif auto_resume:
+            print("[Training] Auto-resume enabled (will resume from latest checkpoint if available)")
+        else:
+            print("[Training] Auto-resume disabled")
+
     training.train(model=model, ema_model=ema_model, train_dataloader=train_loader, val_dataloader=val_loader, epochs=opt.num_epochs,
                    lr=lr, steps_til_summary=opt.steps_til_summary, epochs_til_checkpoint=opt.epochs_til_ckpt,
                    model_dir=root_path, loss_fn=loss_fn, iters_til_checkpoint=opt.iters_til_ckpt, summary_fn=summary_fn,
-                   clip_grad=False, val_loss_fn=val_loss_fn, overwrite=True, gpus=opt.gpus, rank=gpu, device=device)
+                   clip_grad=False, val_loss_fn=val_loss_fn, overwrite=True, gpus=opt.gpus, rank=gpu, device=device,
+                   resume_from_checkpoint=resume_checkpoint, auto_resume=auto_resume)
 
 
 if __name__ == "__main__":
