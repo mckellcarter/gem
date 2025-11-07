@@ -14,6 +14,10 @@ from collections import defaultdict
 import torch.distributed as dist
 from utils import get_mgrid
 import device_utils
+from datetime import datetime
+from pathlib import Path
+import glob
+import json
 
 
 def dict_to_gpu(ob, device=None):
@@ -21,6 +25,292 @@ def dict_to_gpu(ob, device=None):
     if device is None:
         device = device_utils.get_device()
     return device_utils.dict_to_device(ob, device)
+
+
+# ============================================================================
+# Checkpoint Management Utilities
+# ============================================================================
+
+def save_checkpoint(checkpoint_dir, epoch, total_steps, model, ema_model, optimizers,
+                    train_losses, config=None, val_loss=None, is_best=False):
+    """
+    Save a comprehensive training checkpoint.
+
+    Args:
+        checkpoint_dir: Directory to save checkpoints
+        epoch: Current epoch number
+        total_steps: Total training steps completed
+        model: Model to save
+        ema_model: EMA model (can be None)
+        optimizers: List of optimizers
+        train_losses: List of training losses
+        config: Optional training configuration dict
+        val_loss: Optional validation loss
+        is_best: Whether this is the best checkpoint so far
+
+    Returns:
+        Path to saved checkpoint
+    """
+    checkpoint_dir = Path(checkpoint_dir)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create checkpoint dictionary
+    checkpoint = {
+        'epoch': epoch,
+        'total_steps': total_steps,
+        'model_state_dict': model.state_dict(),
+        'optimizer_states': [opt.state_dict() for opt in optimizers],
+        'train_losses': train_losses,
+        'timestamp': datetime.now().isoformat(),
+    }
+
+    # Add EMA model state if available
+    if ema_model is not None:
+        shadow_params = ema_model.shadow_params
+        ema_dict = {}
+        named_model_params = list(model.named_parameters())
+        for (k, v), param in zip(named_model_params, shadow_params):
+            ema_dict[k] = param
+        checkpoint['ema_state_dict'] = ema_dict
+
+    # Add config if provided
+    if config is not None:
+        checkpoint['config'] = config
+
+    # Add validation loss if provided
+    if val_loss is not None:
+        checkpoint['val_loss'] = val_loss
+
+    # Save checkpoint with step number in filename
+    checkpoint_path = checkpoint_dir / f'checkpoint_epoch_{epoch:04d}_step_{total_steps:06d}.pth'
+    torch.save(checkpoint, checkpoint_path)
+
+    # Save as latest checkpoint
+    latest_path = checkpoint_dir / 'checkpoint_latest.pth'
+    torch.save(checkpoint, latest_path)
+
+    # Save as best checkpoint if applicable
+    if is_best:
+        best_path = checkpoint_dir / 'checkpoint_best.pth'
+        torch.save(checkpoint, best_path)
+
+    # Update checkpoint manifest
+    _update_checkpoint_manifest(checkpoint_dir, checkpoint_path, epoch, total_steps, val_loss)
+
+    print(f"[Checkpoint] Saved checkpoint at epoch {epoch}, step {total_steps} to {checkpoint_path}")
+
+    return str(checkpoint_path)
+
+
+def load_checkpoint(checkpoint_path, model, ema_model=None, optimizers=None, device=None):
+    """
+    Load a checkpoint and restore training state.
+
+    Args:
+        checkpoint_path: Path to checkpoint file
+        model: Model to load state into
+        ema_model: Optional EMA model
+        optimizers: Optional list of optimizers to restore
+        device: Device to load checkpoint to
+
+    Returns:
+        Dictionary containing: epoch, total_steps, train_losses, config
+    """
+    if device is None:
+        device = device_utils.get_device()
+
+    print(f"[Checkpoint] Loading checkpoint from {checkpoint_path}")
+
+    # Load checkpoint (weights_only=False is needed for loading optimizer states and complex objects)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+
+    # Detect old checkpoint format (just model weights)
+    if 'model_state_dict' not in checkpoint:
+        print("[Checkpoint] Detected old checkpoint format (model weights only)")
+
+        # Old format may have 'model_dict' key or be the state dict directly
+        if 'model_dict' in checkpoint:
+            model.load_state_dict(checkpoint['model_dict'])
+        else:
+            model.load_state_dict(checkpoint)
+
+        return {
+            'epoch': 0,
+            'total_steps': 0,
+            'train_losses': [],
+            'config': None
+        }
+
+    # Load model state
+    model.load_state_dict(checkpoint['model_state_dict'])
+    print(f"[Checkpoint] Loaded model state from epoch {checkpoint['epoch']}, step {checkpoint['total_steps']}")
+
+    # Load EMA model state if available
+    if ema_model is not None and 'ema_state_dict' in checkpoint:
+        ema_dict = checkpoint['ema_state_dict']
+        # Restore EMA shadow params
+        shadow_params = []
+        for k, v in model.named_parameters():
+            if k in ema_dict:
+                shadow_params.append(ema_dict[k])
+            else:
+                shadow_params.append(v.clone().detach())
+        ema_model.shadow_params = shadow_params
+        print("[Checkpoint] Loaded EMA model state")
+
+    # Load optimizer states if available
+    if optimizers is not None and 'optimizer_states' in checkpoint:
+        optimizer_states = checkpoint['optimizer_states']
+        for i, (opt, state) in enumerate(zip(optimizers, optimizer_states)):
+            opt.load_state_dict(state)
+        print(f"[Checkpoint] Loaded {len(optimizers)} optimizer states")
+
+    return {
+        'epoch': checkpoint.get('epoch', 0),
+        'total_steps': checkpoint.get('total_steps', 0),
+        'train_losses': checkpoint.get('train_losses', []),
+        'config': checkpoint.get('config', None),
+        'val_loss': checkpoint.get('val_loss', None),
+    }
+
+
+def find_latest_checkpoint(checkpoint_dir):
+    """
+    Find the most recent checkpoint in a directory by step number.
+
+    Args:
+        checkpoint_dir: Directory containing checkpoints
+
+    Returns:
+        Path to latest checkpoint or None if no checkpoints found
+    """
+    checkpoint_dir = Path(checkpoint_dir)
+
+    # First, find checkpoint with highest step number from numbered checkpoints
+    checkpoint_pattern = str(checkpoint_dir / 'checkpoint_epoch_*_step_*.pth')
+    checkpoints = glob.glob(checkpoint_pattern)
+
+    if checkpoints:
+        # Extract step number from filename and find checkpoint with highest step
+        def extract_step_number(path):
+            try:
+                # Filename format: checkpoint_epoch_XXXX_step_XXXXXX.pth
+                filename = Path(path).stem
+                step_part = filename.split('_step_')[-1]
+                return int(step_part)
+            except:
+                return 0
+
+        latest = max(checkpoints, key=extract_step_number)
+        print(f"[Checkpoint] Found checkpoint with highest step number: {Path(latest).name}")
+        return latest
+
+    # If no numbered checkpoints, check for checkpoint_latest.pth
+    latest_path = checkpoint_dir / 'checkpoint_latest.pth'
+    if latest_path.exists():
+        print(f"[Checkpoint] Using checkpoint_latest.pth")
+        return str(latest_path)
+
+    # Finally, check for old format checkpoints
+    old_pattern = str(checkpoint_dir / 'model_*.pth')
+    old_checkpoints = glob.glob(old_pattern)
+    if old_checkpoints:
+        # Extract step numbers and find latest
+        def extract_step(path):
+            try:
+                return int(Path(path).stem.split('_')[-1])
+            except:
+                return 0
+        latest = max(old_checkpoints, key=extract_step)
+        print(f"[Checkpoint] Using old format checkpoint: {Path(latest).name}")
+        return latest
+
+    return None
+
+
+def list_checkpoints(checkpoint_dir):
+    """
+    List all checkpoints in a directory with metadata.
+
+    Args:
+        checkpoint_dir: Directory containing checkpoints
+
+    Returns:
+        List of dictionaries with checkpoint information
+    """
+    checkpoint_dir = Path(checkpoint_dir)
+    manifest_path = checkpoint_dir / 'checkpoint_manifest.json'
+
+    # If manifest exists, read it
+    if manifest_path.exists():
+        try:
+            with open(manifest_path, 'r') as f:
+                manifest = json.load(f)
+            return manifest.get('checkpoints', [])
+        except:
+            pass
+
+    # Otherwise scan directory
+    checkpoint_pattern = str(checkpoint_dir / 'checkpoint_epoch_*_step_*.pth')
+    checkpoints = glob.glob(checkpoint_pattern)
+
+    checkpoint_info = []
+    for ckpt_path in sorted(checkpoints):
+        try:
+            ckpt = torch.load(ckpt_path, map_location='cpu')
+            info = {
+                'path': ckpt_path,
+                'epoch': ckpt.get('epoch', 0),
+                'total_steps': ckpt.get('total_steps', 0),
+                'timestamp': ckpt.get('timestamp', ''),
+                'val_loss': ckpt.get('val_loss', None),
+            }
+            checkpoint_info.append(info)
+        except:
+            pass
+
+    return checkpoint_info
+
+
+def _update_checkpoint_manifest(checkpoint_dir, checkpoint_path, epoch, total_steps, val_loss=None):
+    """
+    Update the checkpoint manifest file.
+
+    Args:
+        checkpoint_dir: Directory containing checkpoints
+        checkpoint_path: Path to the new checkpoint
+        epoch: Epoch number
+        total_steps: Total steps
+        val_loss: Optional validation loss
+    """
+    manifest_path = Path(checkpoint_dir) / 'checkpoint_manifest.json'
+
+    # Load existing manifest or create new one
+    if manifest_path.exists():
+        try:
+            with open(manifest_path, 'r') as f:
+                manifest = json.load(f)
+        except:
+            manifest = {'checkpoints': []}
+    else:
+        manifest = {'checkpoints': []}
+
+    # Add new checkpoint entry
+    checkpoint_entry = {
+        'path': str(checkpoint_path),
+        'epoch': epoch,
+        'total_steps': total_steps,
+        'timestamp': datetime.now().isoformat(),
+    }
+
+    if val_loss is not None:
+        checkpoint_entry['val_loss'] = float(val_loss)
+
+    manifest['checkpoints'].append(checkpoint_entry)
+
+    # Save updated manifest
+    with open(manifest_path, 'w') as f:
+        json.dump(manifest, f, indent=2)
 
 
 def average_gradients(model):
@@ -36,7 +326,8 @@ def average_gradients(model):
 def multiscale_training(model, ema_model, lr, steps_til_summary, epochs_til_checkpoint, model_dir, loss_fn,
                         dataloader_callback, dataloader_iters, dataloader_params,
                         val_loss_fn=None, summary_fn=None, iters_til_checkpoint=None, clip_grad=False,
-                        overwrite=True, optimizers=None, batches_per_validation=10, gpus=1, rank=0, device=None):
+                        overwrite=True, optimizers=None, batches_per_validation=10, gpus=1, rank=0, device=None,
+                        resume_from_checkpoint=None, auto_resume=True):
 
     if device is None:
         device = device_utils.get_device()
@@ -51,12 +342,14 @@ def multiscale_training(model, ema_model, lr, steps_til_summary, epochs_til_chec
                                       val_dataloader=val_dataloader, epochs_til_checkpoint=epochs_til_checkpoint, model_dir=model_dir, loss_fn=loss_fn,
                                       val_loss_fn=val_loss_fn, summary_fn=summary_fn, iters_til_checkpoint=iters_til_checkpoint,
                                       clip_grad=clip_grad, overwrite=overwrite, optimizers=optimizers, batches_per_validation=batches_per_validation,
-                                      gpus=gpus, rank=rank, max_steps=max_steps, device=device)
+                                      gpus=gpus, rank=rank, max_steps=max_steps, device=device,
+                                      resume_from_checkpoint=resume_from_checkpoint, auto_resume=auto_resume)
 
 
 def train(model, ema_model, train_dataloader, epochs, lr, steps_til_summary, epochs_til_checkpoint, model_dir, loss_fn,
           summary_fn=None, iters_til_checkpoint=None, val_dataloader=None, clip_grad=False, val_loss_fn=None,
-          overwrite=True, optimizers=None, batches_per_validation=10, gpus=1, rank=0, max_steps=None, device=None):
+          overwrite=True, optimizers=None, batches_per_validation=10, gpus=1, rank=0, max_steps=None, device=None,
+          resume_from_checkpoint=None, auto_resume=True):
 
     if device is None:
         device = device_utils.get_device()
@@ -88,11 +381,52 @@ def train(model, ema_model, train_dataloader, epochs, lr, steps_til_summary, epo
 
         writer = SummaryWriter(summaries_dir)
 
+    # Checkpoint resuming logic
+    start_epoch = 0
     total_steps = 0
+    train_losses = []
+
+    if rank == 0:
+        # Auto-resume from latest checkpoint if requested
+        if auto_resume and resume_from_checkpoint is None:
+            resume_from_checkpoint = find_latest_checkpoint(checkpoints_dir)
+
+        # Load checkpoint if available
+        if resume_from_checkpoint is not None and os.path.exists(resume_from_checkpoint):
+            checkpoint_info = load_checkpoint(
+                resume_from_checkpoint,
+                model=model,
+                ema_model=ema_model,
+                optimizers=optimizers,
+                device=device
+            )
+            start_epoch = checkpoint_info['epoch']
+            total_steps = checkpoint_info['total_steps']
+            train_losses = checkpoint_info['train_losses']
+
+            print(f"[Training] Resuming from epoch {start_epoch}, step {total_steps}")
+        elif resume_from_checkpoint is not None:
+            print(f"[Training] Warning: Checkpoint {resume_from_checkpoint} not found, starting fresh")
+
+    # Broadcast start_epoch and total_steps to all ranks for multi-GPU
+    if gpus > 1:
+        # Convert to tensor for broadcast
+        start_info = torch.tensor([start_epoch, total_steps], dtype=torch.long).to(device)
+        dist.broadcast(start_info, src=0)
+        start_epoch = int(start_info[0].item())
+        total_steps = int(start_info[1].item())
+
     print("len data loader: ", len(train_dataloader), " w/ epochs: ", len(train_dataloader) * epochs)
-    with tqdm(total=len(train_dataloader) * epochs) as pbar:
-        train_losses = []
-        for epoch in range(epochs):
+
+    # Track validation loss for checkpointing
+    current_val_loss = None
+
+    # Calculate initial progress for tqdm based on total_steps already completed
+    # This makes the progress bar start from where we left off when resuming
+    initial_progress = total_steps if total_steps > 0 else (start_epoch * len(train_dataloader))
+
+    with tqdm(total=len(train_dataloader) * epochs, initial=initial_progress) as pbar:
+        for epoch in range(start_epoch, epochs):
 
             for step, (model_input, gt) in enumerate(train_dataloader):
                 model_input = dict_to_gpu(model_input, device)
@@ -151,6 +485,7 @@ def train(model, ema_model, train_dataloader, epochs, lr, steps_til_summary, epo
                 if not total_steps % steps_til_summary and rank == 0:
                     print("Epoch %d, Total loss %0.6f, iteration time %0.6f" % (epoch, train_loss, time.time() - start_time))
 
+                    # Run validation if available
                     if val_dataloader is not None:
                         print("Running validation set...")
                         with torch.no_grad():
@@ -174,22 +509,24 @@ def train(model, ema_model, train_dataloader, epochs, lr, steps_til_summary, epo
                                 summary_fn(model, model_input, gt, model_output, writer, total_steps, 'val_')
                                 writer.add_scalar('val_' + loss_name, single_loss, total_steps)
 
+                                # Track validation loss for checkpointing
+                                if loss_name == 'img_loss' or 'total' in loss_name.lower():
+                                    current_val_loss = single_loss
+
                         model.train()
 
                 if (iters_til_checkpoint is not None) and (not total_steps % iters_til_checkpoint) and rank == 0:
-                    shadow_params = ema_model.shadow_params
-                    ema_dict = {}
-                    named_model_params = list(model.named_parameters())
-
-                    for (k, v), param in zip(named_model_params, shadow_params):
-                        ema_dict[k] = param
-
-                    # torch.save({'model_dict': model.state_dict(),  'optimizer_dict': optimizers[0].state_dict()},
-                    #            os.path.join(checkpoints_dir, 'model_{}_latest.pth'.format(total_steps)))
-                    torch.save({'model_dict': model.state_dict()},
-                               os.path.join(checkpoints_dir, 'model_{}.pth'.format(total_steps)))
-                    np.savetxt(os.path.join(checkpoints_dir, 'train_losses_%04d_iter_%06d.pth' % (epoch, total_steps)),
-                               np.array(train_losses))
+                    # Save comprehensive checkpoint using new checkpoint system
+                    save_checkpoint(
+                        checkpoint_dir=checkpoints_dir,
+                        epoch=epoch,
+                        total_steps=total_steps,
+                        model=model,
+                        ema_model=ema_model,
+                        optimizers=optimizers,
+                        train_losses=train_losses,
+                        val_loss=current_val_loss
+                    )
 
                 total_steps += 1
                 if max_steps is not None and total_steps==max_steps:
