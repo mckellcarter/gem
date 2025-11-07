@@ -1,22 +1,61 @@
-ConfigArgParse==1.1
-h5py==3.1.0
-imageio==2.8.0
-matplotlib==3.2.2
-numpy==1.21.2
-opencv_python==4.5.3.56
-pandas==1.1.3
-Pillow==9.1.0
-plyfile==0.7.4
-scikit_image==0.16.2
-scikit_learn==1.0.2
-scipy==1.7.3
-six==1.15.0
-tensorboard==2.2.2
-tensorflow==2.6.0
-torch==1.2.0
-torch_ema==0.2
-torch_fidelity==0.3.0
-torchaudio==0.11.0
+# GEM (Learning Signal-Agnostic Manifolds of Neural Fields)
+# Requirements for PyTorch 2.6.0 (with MPS/CUDA/CPU support)
+# Python >= 3.8 required
+
+# Core Deep Learning Framework
+torch==2.6.0
+torchvision==0.20.1
+torchaudio==2.5.0
+
+# PyTorch Extensions
+torch-ema==0.3
 torchmeta==1.8.0
-torchvision==0.2.2
-tqdm==4.60.0
+torch-fidelity==0.3.0
+
+# Data Processing & I/O
+numpy==2.2.6
+pandas==2.3.3
+h5py==3.15.1
+imageio==2.37.0
+imageio-ffmpeg==0.5.1
+Pillow==12.0.0
+
+# Audio I/O Backend (required by torchaudio for saving/loading audio files)
+soundfile==0.12.1
+
+# Scientific Computing
+scipy==1.16.3
+scikit-image==0.25.2
+scikit-learn==1.7.2
+
+# Computer Vision
+opencv-python==4.12.0.88
+
+# 3D Processing (for IM-NET shape generation)
+PyMCubes==0.1.6
+
+# Mesh Processing
+plyfile==1.1
+
+# Visualization & Logging
+matplotlib==3.10.7
+tensorboard==2.16.2
+tqdm==4.67.1
+
+# Configuration & Utilities
+ConfigArgParse==1.7.1
+six==1.17.0
+
+# TensorFlow (for TFRecord data loading only)
+tensorflow==2.18.0
+
+# Note: If you encounter issues with torchmeta, you may need to install from source:
+# pip install git+https://github.com/tristandeleu/pytorch-meta.git@master
+
+# For Apple Silicon (M1/M2/M3) users:
+# - PyTorch automatically detects and uses MPS backend
+# - Some packages may need to be installed via conda-forge for better compatibility
+
+# For CUDA users:
+# - Ensure CUDA toolkit version matches PyTorch requirements
+# - Visit https://pytorch.org for CUDA-specific installation instructions

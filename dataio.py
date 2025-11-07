@@ -91,11 +91,13 @@ class MovingMNIST(data.Dataset):
                                ' You can use download=True to download it')
 
         if self.train:
+            # Load processed data (weights_only=False for backward compatibility)
             self.train_data = torch.load(
-                os.path.join(self.root, self.processed_folder, self.training_file))
+                os.path.join(self.root, self.processed_folder, self.training_file), weights_only=False)
         else:
+            # Load processed data (weights_only=False for backward compatibility)
             self.test_data = torch.load(
-                os.path.join(self.root, self.processed_folder, self.test_file))
+                os.path.join(self.root, self.processed_folder, self.test_file), weights_only=False)
 
     def __getitem__(self, index):
         """
@@ -500,7 +502,7 @@ class CelebAHQGAN(torch.utils.data.Dataset):
     def __getitem__(self, item):
         rgb = self.read_frame("", item)
 
-        query_dict = {"idx": torch.Tensor([item]).long()}
+        query_dict = {"idx": torch.tensor([item], dtype=torch.long)}
         return {'context': query_dict, 'query': query_dict}, query_dict
 
 
@@ -570,15 +572,30 @@ class Cifar10(Dataset):
         return return_dict
 
 class CelebAHQ(torch.utils.data.Dataset):
-    def __init__(self, sidelength=1024, cache=None, cache_mask=None, split='train', subset=None):
+    def __init__(self, sidelength=1024, cache=None, cache_mask=None, split='train', subset=None, data_root=None):
         self.name = 'celebahq'
         self.channels = 3
         self.im_size = 64
 
-        if split == "train":
-            self.im_paths = sorted(glob('/data/vision/billf/scratch/yilundu/dataset/celebahq/celebahq_train/data128x128_small/*.jpg'))
-        else:
-            self.im_paths = sorted(glob('/data/vision/billf/scratch/yilundu/dataset/celebahq/celebahq_test/*.jpg'))
+        if data_root is None:
+            # Default to repo subdirectory
+            repo_root = os.path.dirname(os.path.abspath(__file__))
+            data_root = os.path.join(repo_root, 'data', 'celeba')
+
+        # Look for images recursively in data_root
+        self.im_paths = sorted(glob(os.path.join(data_root, '**/*.jpg'), recursive=True))
+        # If no jpg, try png
+        if len(self.im_paths) == 0:
+            self.im_paths = sorted(glob(os.path.join(data_root, '**/*.png'), recursive=True))
+
+        if len(self.im_paths) == 0:
+            raise RuntimeError(
+                f"No images found in {data_root}!\n"
+                f"Please either:\n"
+                f"  1. Place CelebA images in: {data_root}\n"
+                f"  2. Pass data_root parameter with your dataset path\n"
+                f"  3. Set CELEBA_PATH environment variable"
+            )
 
     def __len__(self):
         return len(self.im_paths)
@@ -593,7 +610,7 @@ class CelebAHQ(torch.utils.data.Dataset):
         return {"rgb":rgb}
 
 class CelebA(torch.utils.data.Dataset):
-    def __init__(self, sidelength, split='train'):
+    def __init__(self, sidelength, cache=None, cache_mask=None, split='train', data_root=None, auto_download=True):
         transform = Compose([
             Resize((sidelength, sidelength)),
             CenterCrop((sidelength, sidelength)),
@@ -601,25 +618,58 @@ class CelebA(torch.utils.data.Dataset):
             Normalize(torch.Tensor([0.5]), torch.Tensor([0.5]))
         ])
 
-        self.transform = transform
-        self.path = "/datasets01/CelebA/CelebA/072017/img_align_celeba/"
-        self.labels = pd.read_csv("/private/home/yilundu/list_attr_celeba.txt", sep="\s+", skiprows=1)
-        self.name = 'celeba'
+        if data_root is None:
+            # Default to repo subdirectory
+            repo_root = os.path.dirname(os.path.abspath(__file__))
+            data_root = os.path.join(repo_root, 'data')
 
+        self.transform = transform
+        self.name = 'celeba'
         self.channels = 3
+        self.im_size = sidelength
         self.mgrid = utils.get_mgrid(sidelength, dim=2)
         self.sidelength = sidelength
 
+        # Try to use torchvision's CelebA with auto-download
+        try:
+            from torchvision.datasets import CelebA as TorchCelebA
+            print(f"Using torchvision CelebA dataset (auto-download={'enabled' if auto_download else 'disabled'})")
+            self.dataset = TorchCelebA(
+                root=data_root,
+                split=split,
+                target_type='attr',
+                transform=None,  # We'll apply transform in __getitem__
+                download=auto_download
+            )
+            self.use_torchvision = True
+        except Exception as e:
+            # Fallback to manual file loading
+            print(f"Could not load torchvision CelebA ({e}), using manual file loading")
+            self.use_torchvision = False
+            self.path = os.path.join(data_root, 'celeba')
+            labels_path = os.path.join(self.path, 'list_attr_celeba.txt')
+            if os.path.exists(labels_path):
+                self.labels = pd.read_csv(labels_path, sep=r"\s+", skiprows=1)
+            else:
+                self.labels = None
+
     def __len__(self):
-        return self.labels.shape[0]
+        if self.use_torchvision:
+            return len(self.dataset)
+        else:
+            return self.labels.shape[0] if self.labels is not None else 0
 
     def __getitem__(self, index):
-        info = self.labels.iloc[index]
-        fname = info.name
-        path = osp.join(self.path, fname)
-        im = self.transform(Image.open(path))
-
-        return {"rgb": im}
+        if self.use_torchvision:
+            img, _ = self.dataset[index]
+            im = self.transform(img)
+            return {"rgb": im}
+        else:
+            info = self.labels.iloc[index]
+            fname = info.name
+            path = osp.join(self.path, fname)
+            im = self.transform(Image.open(path))
+            return {"rgb": im}
 
 
 class NYUDepth(torch.utils.data.Dataset):
@@ -716,9 +766,13 @@ class SingleClassImagenet(torch.utils.data.Dataset):
 
 
 class IMNet(torch.utils.data.Dataset):
-    def __init__(self, split='train', sampling=None):
-        # self.data_path = os.path.join('/data/vision/billf/scratch/yilundu/dataset/imnet', 'IM-NET/IMSVR/data', 'all_vox256_img_' + split + '.hdf5')
-        self.data_path = os.path.join('all_vox256_img_' + split + '.hdf5')
+    def __init__(self, split='train', sampling=None, data_root=None):
+        # Use data_root or fall back to config dataset_root
+        if data_root is None:
+            repo_root = os.path.dirname(os.path.abspath(__file__))
+            data_root = os.path.join(repo_root, 'data')
+
+        self.data_path = os.path.join(data_root, 'IM-NET', 'IMSVR', 'data', 'all_vox256_img_' + split + '.hdf5')
         self.sampling = sampling
         self.init_model_bool = False
         self.split = split
@@ -735,11 +789,12 @@ class IMNet(torch.utils.data.Dataset):
         data_path = self.data_path
         data_dict = h5py.File(data_path, 'r')
         self.data_points_int = np.array(data_dict['points_64'][:])
-        self.data_points = (self.data_points_int.astype(np.float32) + 1) / 128 - 1
+        # Ensure float32 throughout for MPS compatibility
+        self.data_points = ((self.data_points_int.astype(np.float32) + 1) / np.float32(128) - 1).astype(np.float32)
         # import pdb
         # pdb.set_trace()
         # print(self.data_points)
-        self.data_values = np.array(data_dict['values_64'][:])
+        self.data_values = np.array(data_dict['values_64'][:], dtype=np.float32)
         self.data_voxels = np.array(data_dict['voxels'][:])
 
         self.init_model_bool = True
@@ -757,7 +812,7 @@ class IMNet(torch.utils.data.Dataset):
             points = points[idcs]
             occs = occs[idcs]
 
-        ctxt_dict = query_dict = {'x':points, 'occupancy':occs, 'idx':torch.Tensor([idx]).long()}
+        ctxt_dict = query_dict = {'x':points, 'occupancy':occs, 'idx':torch.tensor([idx], dtype=torch.long)}
 
         idx_other = random.randint(0, len(self) - 1)
 
@@ -766,12 +821,14 @@ class IMNet(torch.utils.data.Dataset):
 
         intersection = (voxel_i * voxel_j).astype(np.float32).sum()
         union = ((voxel_i + voxel_j) > 0).astype(np.float32).sum()
-        iou = intersection / union
+        # Ensure division stays float32 for MPS compatibility
+        iou = np.float32(intersection / union)
 
-        ctxt_dict['idx_other'] = torch.Tensor([idx_other]).long()
-        query_dict['idx_other'] = torch.Tensor([idx_other]).long()
-        query_dict['mse'] = iou.item()
-        ctxt_dict['mse'] = iou.item()
+        ctxt_dict['idx_other'] = torch.tensor([idx_other], dtype=torch.long)
+        query_dict['idx_other'] = torch.tensor([idx_other], dtype=torch.long)
+        # Store as float32 tensor to avoid DataLoader converting Python float to float64
+        query_dict['mse'] = torch.tensor(float(iou), dtype=torch.float32)
+        ctxt_dict['mse'] = torch.tensor(float(iou), dtype=torch.float32)
 
         return {'context':ctxt_dict, 'query':query_dict}, query_dict
 
@@ -1089,11 +1146,11 @@ class GeneralizationWrapper(torch.utils.data.Dataset):
             ctxt_dict['y'] = ctxt_dict[self.inner_loop_supervision_key]
             query_dict['y'] = query_dict[self.inner_loop_supervision_key]
 
-        ctxt_dict['idx'] = torch.Tensor([idx]).long() + self.idx_offset
-        query_dict['idx'] = torch.Tensor([idx]).long() + self.idx_offset
+        ctxt_dict['idx'] = torch.tensor([idx], dtype=torch.long) + self.idx_offset
+        query_dict['idx'] = torch.tensor([idx], dtype=torch.long) + self.idx_offset
 
-        ctxt_dict['idx_other'] = torch.Tensor([idx_other]).long() + self.idx_offset
-        query_dict['idx_other'] = torch.Tensor([idx_other]).long() + self.idx_offset
+        ctxt_dict['idx_other'] = torch.tensor([idx_other], dtype=torch.long) + self.idx_offset
+        query_dict['idx_other'] = torch.tensor([idx_other], dtype=torch.long) + self.idx_offset
         query_dict['mse'] = dist_mse
         ctxt_dict['mse'] = dist_mse
 
@@ -1169,12 +1226,20 @@ class SpokenDigits(torch.utils.data.Dataset):
         return {"audio": waveform, "label": self.labels[idx]}
 
 class NSynth(Dataset):
-    def __init__(self, split='train', resample_rate=None, data_path="/tmp"):
+    def __init__(self, split='train', resample_rate=None, data_path=None):
         self.rate = 16000
+
+        if data_path is None:
+            # Default to repo data/ directory
+            repo_root = os.path.dirname(os.path.abspath(__file__))
+            data_path = os.path.join(repo_root, 'data')
+
         if split == "train":
-            self.wav = np.load("wav_train.npy").squeeze()
+            wav_path = os.path.join(data_path, "wav_train.npy")
+            self.wav = np.load(wav_path).squeeze()
         else:
-            self.wav = np.load("wav_test.npy").squeeze()
+            wav_path = os.path.join(data_path, "wav_test.npy")
+            self.wav = np.load(wav_path).squeeze()
 
     def __len__(self):
         # return len(self.data_points)
@@ -1186,11 +1251,16 @@ class NSynth(Dataset):
 
 
 class NSynthFull(torch.utils.data.Dataset):
-    def __init__(self, split='train', resample_rate=None, data_path="/private/home/yilundu/sandbox/function-space-gan/data/nsynth/records/"):
+    def __init__(self, split='train', resample_rate=None, data_path=None):
         # read in TFRecord data for audio waveforms + meta-data
         # self.data_path = f'{data_path}nsynth_{split}.tfrecord'
 
-        data_points = json.load(open("nsynth_{}.json".format(split), 'r'))
+        if data_path is None:
+            # Default to repo data/ directory
+            repo_root = os.path.dirname(os.path.abspath(__file__))
+            data_path = os.path.join(repo_root, 'data')
+
+        data_points = json.load(open(os.path.join(data_path, "nsynth_{}.json".format(split)), 'r'))
         # print("data path: ", self.data_path)
         self.data_points = data_points
 
@@ -1200,7 +1270,7 @@ class NSynthFull(torch.utils.data.Dataset):
 
         # extract features
         # help from: https://stackoverflow.com/questions/37151895/tensorflow-read-all-examples-from-a-tfrecords-at-once
-        data = np.load("nsynth.npz")
+        data = np.load(os.path.join(data_path, "nsynth.npz"))
         self.mean = torch.Tensor(data['mean'])
         self.std = torch.Tensor(data['std'])
 
@@ -1245,11 +1315,33 @@ class NSynthFull(torch.utils.data.Dataset):
 
 
 class FaceBed(torch.utils.data.Dataset):
-    def __init__(self, split='train', cache=None, cache_mask=None):
+    def __init__(self, split='train', cache=None, cache_mask=None, data_path=None, auto_download=True):
         # read in TFRecord data for audio waveforms + meta-data
         # self.data_path = f'{data_path}nsynth_{split}.tfrecord'
 
-        self.ims = sorted(glob("/data/vision/billf/scratch/yilundu/dataset/lsun/lsun/images/*.png"))
+        if data_path is None:
+            # Default to repo data/ directory
+            repo_root = os.path.dirname(os.path.abspath(__file__))
+            data_path = os.path.join(repo_root, 'data')
+
+        # Try to find local LSUN images first
+        lsun_path = os.path.join(data_path, 'lsun')
+        self.ims = sorted(glob(os.path.join(lsun_path, "images/*.png")))
+
+        # If no local images and auto_download enabled, try torchvision LSUN
+        if len(self.ims) == 0 and auto_download:
+            try:
+                from torchvision.datasets import LSUN
+                print(f"No local LSUN images found. Using torchvision LSUN (auto-download={auto_download})")
+                # LSUN bedroom category
+                self.dataset = LSUN(root=data_path, classes=['bedroom_train' if split == 'train' else 'bedroom_val'])
+                self.use_torchvision = True
+            except Exception as e:
+                print(f"Could not load torchvision LSUN ({e}), trying manual paths")
+                self.use_torchvision = False
+        else:
+            self.use_torchvision = False
+
         self.im_size = 64
 
         cache = np.ctypeslib.as_array(cache.get_obj())
@@ -1264,9 +1356,24 @@ class FaceBed(torch.utils.data.Dataset):
         self.cache_mask = torch.from_numpy(cache_mask)
 
     def __len__(self):
+        if self.use_torchvision:
+            return len(self.dataset)
         return len(self.ims)
 
     def __getitem__(self, idx):
+        # If using torchvision dataset
+        if self.use_torchvision:
+            img, _ = self.dataset[idx]
+            # Convert PIL to numpy, resize, and convert to tensor
+            im = np.array(img)
+            s = im.shape
+            if len(s) == 3:
+                imsize = min(s[0], s[1])
+                ox, oy = (s[0] - imsize) // 2, (s[1] - imsize) // 2
+                im = im[ox:imsize+ox, oy:imsize+oy]
+                im = resize(im, (64, 64), preserve_range=True).astype(np.uint8)
+            return torch.from_numpy(im).permute(2, 0, 1).float() / 255.0
+
         # audio processing help from: https://pytorch.org/tutorials/beginner/audio_preprocessing_tutorial.html
         import torchaudio  # NOTE: adding here so it doesn't break other envs
         # to install, run: conda install -c pytorch torchaudio
@@ -1352,11 +1459,11 @@ class AudioGeneralizationWrapper(torch.utils.data.Dataset):
 
         ctxt_dict = query_dict =  audio_ctxt_dict
 
-        ctxt_dict['idx'] = torch.Tensor([idx]).long()
-        query_dict['idx'] = torch.Tensor([idx]).long()
+        ctxt_dict['idx'] = torch.tensor([idx], dtype=torch.long)
+        query_dict['idx'] = torch.tensor([idx], dtype=torch.long)
 
-        ctxt_dict['idx_other'] = torch.Tensor([idx_other]).long()
-        query_dict['idx_other'] = torch.Tensor([idx_other]).long()
+        ctxt_dict['idx_other'] = torch.tensor([idx_other], dtype=torch.long)
+        query_dict['idx_other'] = torch.tensor([idx_other], dtype=torch.long)
 
         query_dict['mse'] = dist_mse
         ctxt_dict['mse'] = dist_mse
@@ -1449,42 +1556,65 @@ class SpokenMNIST(torch.utils.data.Dataset):
 
 class VoxCeleb(torch.utils.data.Dataset):
     # combine Spoken Digits dataset with MNIST
-    def __init__(self, split='train'):
-        self.image_path = "/data/vision/billf/scratch/yilundu/dataset/voxceleba/unzippedIntervalFaces/data/"
-        self.audio_path = "/data/vision/billf/scratch/yilundu/dataset/voxceleba/wav"
-        csv_path = "/data/vision/billf/scratch/yilundu/dataset/voxceleba/vox1_meta.csv"
-        df = pd.read_csv(csv_path, sep='\t')
-        vox_id = df['VoxCeleb1 ID']
-        face_id = df['VGGFace1 ID']
+    def __init__(self, split='train', data_path=None, auto_download=True):
+        if data_path is None:
+            # Default to repo data/ directory
+            repo_root = os.path.dirname(os.path.abspath(__file__))
+            data_path = os.path.join(repo_root, 'data')
 
-
-        # examples = []
-
-        # for i in range(len(vox_id)):
-        #     vox_id_i = vox_id[i]
-        #     face_id_i = face_id[i]
-
-        #     audio_path = osp.join(self.audio_path, vox_id_i)
-        #     image_path = osp.join(self.image_path, face_id_i, "1.6")
-
-        #     folders = sorted(os.listdir(image_path))
-
-        #     for folder in folders:
-        #         audio_path_i = osp.join(audio_path, folder, '00001.wav')
-        #         image_path_i = osp.join(image_path, folder, '1', '01.jpg')
-
-        #         examples.append((audio_path_i, image_path_i))
-
-        examples = pickle.load(open("examples.p", "rb"))
-        self.examples = examples
+        # Try to load local examples file first
+        examples_path = os.path.join(data_path, "voxceleb", "examples.p")
+        if os.path.exists(examples_path):
+            examples = pickle.load(open(examples_path, "rb"))
+            self.examples = examples
+            self.use_torchvision = False
+            self.image_path = os.path.join(data_path, "voxceleb", "unzippedIntervalFaces/data/")
+            self.audio_path = os.path.join(data_path, "voxceleb", "wav")
+        elif auto_download:
+            # Try to use torchaudio's VoxCeleb1
+            try:
+                import torchaudio.datasets as tad
+                print(f"No local VoxCeleb data found. Using torchaudio VoxCeleb1Identification (auto-download={auto_download})")
+                self.dataset = tad.VoxCeleb1Identification(
+                    root=data_path,
+                    subset='train' if split == 'train' else 'test',
+                    download=auto_download
+                )
+                self.use_torchvision = True
+                print(f"Using torchaudio VoxCeleb1 with {len(self.dataset)} samples")
+            except Exception as e:
+                print(f"Could not load torchaudio VoxCeleb1 ({e})")
+                raise RuntimeError(
+                    f"No VoxCeleb data found at {examples_path} and auto-download failed!\n"
+                    f"Please either:\n"
+                    f"  1. Place VoxCeleb data and examples.p in: {os.path.join(data_path, 'voxceleb')}\n"
+                    f"  2. Ensure internet connection for auto-download"
+                )
+        else:
+            raise RuntimeError(f"No VoxCeleb examples.p file found at {examples_path}")
 
     def __len__(self):
+        if self.use_torchvision:
+            return len(self.dataset)
         return len(self.examples)
 
     def __getitem__(self, idx):
+        # If using torchaudio dataset
+        if self.use_torchvision:
+            import torchaudio
+            waveform, sample_rate, _, _, _ = self.dataset[idx]
+            # Process similar to manual loading
+            if waveform.shape[1] >= 32000:
+                waveform = waveform[:, 16000:32000]
+            elif waveform.shape[1] >= 16000:
+                waveform = waveform[:, :16000]
+            gt_spectrogram = torchaudio.transforms.Spectrogram()(waveform) / 100.
+            # Note: No image available from torchaudio VoxCeleb, return None
+            return gt_spectrogram, None
 
         try:
             audio_path, im_path =  self.examples[idx]
+            import torchaudio
             waveform, sample_rate = torchaudio.load(audio_path)
             waveform = waveform[:, 16000:32000]
             gt_spectrogram = torchaudio.transforms.Spectrogram()(waveform) / 100.
@@ -1515,15 +1645,20 @@ class VoxCeleb(torch.utils.data.Dataset):
 
 class Instrument(torch.utils.data.Dataset):
     # combine Spoken Digits dataset with MNIST
-    def __init__(self, split='train', cache=None, cache_wav=None, cache_mask=None):
+    def __init__(self, split='train', cache=None, cache_wav=None, cache_mask=None, data_path=None):
+        if data_path is None:
+            # Default to repo data/ directory
+            repo_root = os.path.dirname(os.path.abspath(__file__))
+            data_path = os.path.join(repo_root, 'data')
+
         if split == "train":
-            data = np.load("/home/gridsan/yilundu/my_files/function-space-gan/instrument_train.npz")
+            data = np.load(os.path.join(data_path, "instrument_train.npz"))
             self.ims = data['rgbs']
             self.ims = self.ims.transpose((0, 3, 1, 2))
             self.ims = 2 * (((self.ims + 1) / 2.) / 255. - 0.5)
             self.wavs = data['spects']
         else:
-            data = np.load("/home/gridsan/yilundu/my_files/function-space-gan/instrument_test.npz")
+            data = np.load(os.path.join(data_path, "instrument_test.npz"))
             self.ims = data['rgbs']
             self.wavs = data['spects']
 
@@ -1540,18 +1675,23 @@ class Instrument(torch.utils.data.Dataset):
 
 class Trombone(torch.utils.data.Dataset):
     # combine Spoken Digits dataset with MNIST
-    def __init__(self, split='train', cache=None, cache_wav=None, cache_mask=None):
+    def __init__(self, split='train', cache=None, cache_wav=None, cache_mask=None, data_path=None):
+        if data_path is None:
+            # Default to repo data/ directory
+            repo_root = os.path.dirname(os.path.abspath(__file__))
+            data_path = os.path.join(repo_root, 'data')
+
         if split == "train":
-            data = np.load("/home/gridsan/yilundu/my_files/function-space-gan/trombone_train.npz")
+            data = np.load(os.path.join(data_path, "trombone_train.npz"))
             self.ims = data['rgbs']
             self.ims = self.ims.transpose((0, 3, 1, 2))
             self.wavs = data['spects']
         else:
-            data = np.load("/home/gridsan/yilundu/my_files/function-space-gan/trombone_test.npz")
+            data = np.load(os.path.join(data_path, "trombone_test.npz"))
             self.ims = data['rgbs']
             self.wavs = data['spects']
 
-        data = np.load("trombone.npz")
+        data = np.load(os.path.join(data_path, "trombone.npz"))
         mean, std = data['mean'], data['std']
         self.mean, self.std = mean, std
 
@@ -1570,14 +1710,18 @@ class Trombone(torch.utils.data.Dataset):
 
 class InstrumentFull(torch.utils.data.Dataset):
     # combine Spoken Digits dataset with MNIST
-    def __init__(self, split='train', cache=None, cache_wav=None, cache_mask=None):
+    def __init__(self, split='train', cache=None, cache_wav=None, cache_mask=None, data_path=None):
+        if data_path is None:
+            # Default to repo data/ directory
+            repo_root = os.path.dirname(os.path.abspath(__file__))
+            data_path = os.path.join(repo_root, 'data')
 
         if split == "train":
-            ims = sorted(glob("/home/gridsan/yilundu/dataset/Sub-URMP/img/train/cello/*.jpg"))
-            wavs = sorted(glob("/home/gridsan/yilundu/dataset/Sub-URMP/chunk/train/cello/*.wav"))
+            ims = sorted(glob(os.path.join(data_path, "Sub-URMP/img/train/cello/*.jpg")))
+            wavs = sorted(glob(os.path.join(data_path, "Sub-URMP/chunk/train/cello/*.wav")))
         else:
-            ims = sorted(glob("/home/gridsan/yilundu/dataset/Sub-URMP/img/validation/cello/*.jpg"))
-            wavs = sorted(glob("/home/gridsan/yilundu/dataset/Sub-URMP/chunk/validation/cello/*.wav"))
+            ims = sorted(glob(os.path.join(data_path, "Sub-URMP/img/validation/cello/*.jpg")))
+            wavs = sorted(glob(os.path.join(data_path, "Sub-URMP/chunk/validation/cello/*.wav")))
         self.ims = ims
         self.wavs = wavs
 
@@ -1597,7 +1741,7 @@ class InstrumentFull(torch.utils.data.Dataset):
         else:
             self.cache_wav = cache_wav
 
-        data = np.load("instrument.npz")
+        data = np.load(os.path.join(data_path, "instrument.npz"))
         self.mean = torch.Tensor(data['mean'])[:-1]
         self.std = torch.Tensor(data['std'])[:-1]
 
@@ -1765,8 +1909,8 @@ class AVGeneralizationWrapper(torch.utils.data.Dataset):
             # mask = mask[idcs,:]
 
         # concatenate x + mask, idx is the same, independent wav, rate, + rgb
-        ctxt_dict.update({'wav':audio_ctxt_dict['rgb'],'rate': self.rate,'idx':torch.Tensor([idx]).long()})
-        ctxt_dict['idx_other'] = torch.Tensor([idx_other]).long()
+        ctxt_dict.update({'wav':audio_ctxt_dict['rgb'],'rate': self.rate,'idx':torch.tensor([idx], dtype=torch.long)})
+        ctxt_dict['idx_other'] = torch.tensor([idx_other], dtype=torch.long)
 
         # account for differences in channels and input (for coords + mask)
         # include an attribute to decompose back to img + audio signals

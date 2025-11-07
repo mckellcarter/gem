@@ -340,7 +340,18 @@ def audio(model, model_input, gt, model_output, writer, total_steps, prefix='tra
 
     gt_wav = gt_wav.to(device)
     pred_wav = torch.squeeze(model_output['model_out'][:, :, 0], axis=-1)
-    data = np.load("instrument.npz")
+
+    # Load normalization stats from data directory
+    repo_root = os.path.dirname(os.path.abspath(__file__))
+    data_path = os.path.join(repo_root, 'data', 'instrument.npz')
+
+    if not os.path.exists(data_path):
+        print(f"Warning: Could not find {data_path}")
+        print("Audiovisual training requires instrument.npz for normalization stats.")
+        print("Skipping audio visualization for this step.")
+        return
+
+    data = np.load(data_path)
 
     mean = torch.Tensor(data['mean'][:-1]).to(device)
     std = torch.Tensor(data['std'][:-1]).to(device)

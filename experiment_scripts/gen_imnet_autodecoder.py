@@ -1,12 +1,15 @@
 # Enable import from parent package
 import sys
 import os
-import collections
+try:
+    from collections.abc import Mapping
+except ImportError:
+    from collections import Mapping
 sys.path.append( os.path.dirname( os.path.dirname( os.path.abspath(__file__) ) ) )
 import numpy as np
 import random
 
-import dataio, meta_modules, summaries, loss_functions, modules, training
+import dataio, meta_modules, summaries, loss_functions, modules, training, device_utils
 import torch.distributed as dist
 
 from multiprocessing import Manager
@@ -149,13 +152,15 @@ p.add_argument('--checkpoint_path', default=None, help='Checkpoint to trained mo
 p.add_argument('--test_latent_path', default=None, help='Checkpoint to trained latents')
 opt = p.parse_args()
 
-def dict_to_gpu(ob):
-    if isinstance(ob, collections.Mapping):
-        return {k: dict_to_gpu(v) for k, v in ob.items()}
+def dict_to_gpu(ob, device=None):
+    if device is None:
+        device = device_utils.get_device()
+    if isinstance(ob, Mapping):
+        return {k: dict_to_gpu(v, device) for k, v in ob.items()}
     elif type(ob) == float:
         return ob
     else:
-        return ob.cuda()
+        return ob.to(device)
 
 
 def sync_model(model):
@@ -166,14 +171,15 @@ def sync_model(model):
 
 
 class OccupancyDecoder():
-    def __init__(self, model):
+    def __init__(self, model, device=None):
+        self.device = device if device is not None else device_utils.get_device()
         self.model = model
-        self.model.cuda()
+        self.model.to(self.device)
         self.model.eval()
 
     def __call__(self, samples, latent=None):
-        model_input = {'context':{'idx':torch.Tensor([0]).long().cuda()[None,...],
-                                  'x':samples[None,...].cuda()}}
+        model_input = {'context':{'idx':torch.tensor([0], dtype=torch.long, device=self.device)[None,...],
+                                  'x':samples[None,...].to(self.device)}}
         model_out = self.model.forward_with_latent(latent, model_input)[..., 0]
         # model_out = self.model.forward(model_input)['model_out'][..., 0]
         return model_out
@@ -192,13 +198,14 @@ def multigpu_train(gpu, opt, shared_dict, shared_mask):
     random.shuffle(idxs)
     # train_dataset = dataio.IMNet(split='test', sampling=None)
 
-    torch.cuda.set_device(gpu)
+    device = device_utils.set_device(gpu)
 
 
     model = high_level_models.SirenImplicitGAN(num_items=num_items, hidden_layers=3, sigmoid_output=True, type=opt.type,
-                                               in_features=3, out_features=1, amortized=False, latent_dim=1024, manifold_dim=10).cuda()
+                                               in_features=3, out_features=1, amortized=False, latent_dim=1024, manifold_dim=10).to(device)
 
-    state_dict = torch.load(opt.checkpoint_path, map_location="cpu")['model_dict']
+    # Load checkpoint (weights_only=False needed for loading checkpoint dicts)
+    state_dict = torch.load(opt.checkpoint_path, map_location="cpu", weights_only=False)['model_dict']
     model.load_state_dict(state_dict)
 
     ix = 0
@@ -212,7 +219,7 @@ def multigpu_train(gpu, opt, shared_dict, shared_mask):
 
 
     num_samples = N ** 3
-    decoder = OccupancyDecoder(model)
+    decoder = OccupancyDecoder(model, device)
 
     max_batch = 20000
 
@@ -246,7 +253,7 @@ def multigpu_train(gpu, opt, shared_dict, shared_mask):
 
             while head < num_samples:
                 print(head)
-                sample_subset = samples[head : min(head + max_batch, num_samples), 0:3].cuda()
+                sample_subset = samples[head : min(head + max_batch, num_samples), 0:3].to(device)
 
                 samples[head : min(head + max_batch, num_samples), 3] = (
                     decoder(sample_subset, latent=latent)

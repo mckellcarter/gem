@@ -3,7 +3,7 @@ import sys
 import os
 sys.path.append( os.path.dirname( os.path.dirname( os.path.abspath(__file__) ) ) )
 
-import dataio, meta_modules, summaries, loss_functions, modules, training, config
+import dataio, meta_modules, summaries, loss_functions, modules, training, config, device_utils
 import torch.distributed as dist
 import multiprocessing
 import ctypes
@@ -93,17 +93,18 @@ def multigpu_train(gpu, opt, shared_dict, shared_dict_wav, shared_mask):
                               num_workers=8)
     val_loader = DataLoader(val_generalization_dataset, shuffle=True, batch_size=1, pin_memory=True, num_workers=2)
 
-    torch.cuda.set_device(gpu)
+    device = device_utils.set_device(gpu)
 
     print("data set size: ", len(train_generalization_dataset))
 
 
     model = high_level_models.SirenImplicitGAN(num_items=len(train_generalization_dataset), hidden_layers=3, pos_encode=True, tanh_output=True, type=opt.type,
-                                               in_features=2, out_features=3, amortized=False, latent_dim=1024, manifold_dim=10, audiovisual=True).cuda()
+                                               in_features=2, out_features=3, amortized=False, latent_dim=1024, manifold_dim=10, audiovisual=True).to(device)
 
 
     if opt.checkpoint_path is not None:
-        model.load_state_dict(torch.load(opt.checkpoint_path)['model_dict'])
+        # Load checkpoint (weights_only=False needed for loading checkpoint dicts)
+        model.load_state_dict(torch.load(opt.checkpoint_path, weights_only=False)['model_dict'])
 
     if opt.gpus > 1:
         sync_model(model)
@@ -126,7 +127,7 @@ def multigpu_train(gpu, opt, shared_dict, shared_dict_wav, shared_mask):
     training.train(model=model, ema_model=ema_model, train_dataloader=train_loader, val_dataloader=val_loader, epochs=opt.num_epochs,
                    lr=lr, steps_til_summary=opt.steps_til_summary, epochs_til_checkpoint=opt.epochs_til_ckpt,
                    model_dir=root_path, loss_fn=loss_fn, iters_til_checkpoint=opt.iters_til_ckpt, summary_fn=summary_fn,
-                   clip_grad=False, val_loss_fn=val_loss_fn, overwrite=True, gpus=opt.gpus, rank=gpu)
+                   clip_grad=False, val_loss_fn=val_loss_fn, overwrite=True, gpus=opt.gpus, rank=gpu, device=device)
 
 
 if __name__ == "__main__":
